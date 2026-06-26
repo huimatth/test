@@ -52,10 +52,17 @@
             box-shadow: var(--shadow-md);
         }
         .header-flag {
-            width: 28px; height: 20px;
-            background: linear-gradient(to right, #d52b1e 25%, white 25%, white 75%, #d52b1e 75%);
-            border-radius: 2px;
+            width: 36px;
+            height: 24px;
             flex-shrink: 0;
+            display: flex;
+            align-items: center;
+        }
+        .header-flag svg {
+            width: 36px;
+            height: 24px;
+            border-radius: 2px;
+            box-shadow: 0 0 0 1px rgba(255,255,255,.15);
         }
         header h1 {
             font-size: 15px;
@@ -266,6 +273,15 @@
             font-weight: 600;
             white-space: nowrap;
         }
+        .col-din a {
+            color: var(--blue-mid);
+            text-decoration: none;
+            border-bottom: 1px dashed var(--blue-mid);
+        }
+        .col-din a:hover {
+            color: var(--teal);
+            border-bottom-color: var(--teal);
+        }
         .col-brand { font-weight: 500; }
         .col-date {
             white-space: nowrap;
@@ -357,9 +373,23 @@
 
 <body>
     <header>
-        <div class="header-flag" aria-hidden="true"></div>
+        <div class="header-flag" aria-label="Canadian flag">
+            <svg viewBox="0 0 36 24" xmlns="http://www.w3.org/2000/svg" role="img" aria-hidden="true">
+                <!-- Left red band -->
+                <rect x="0" y="0" width="9" height="24" fill="#D52B1E"/>
+                <!-- White centre -->
+                <rect x="9" y="0" width="18" height="24" fill="#FFFFFF"/>
+                <!-- Right red band -->
+                <rect x="27" y="0" width="9" height="24" fill="#D52B1E"/>
+                <!-- Maple leaf (centred on white band) -->
+                <path transform="translate(18,12) scale(0.038)" fill="#D52B1E"
+                      d="M0,-130 L15,-80 L65,-90 L45,-50 L90,-20 L55,-15 L60,30
+                         L30,20 L30,80 L0,70 L-30,80 L-30,20 L-60,30 L-55,-15
+                         L-90,-20 L-45,-50 L-65,-90 L-15,-80 Z"/>
+            </svg>
+        </div>
         <h1>Health Canada — Drug Product Database</h1>
-        <span class="subtitle">Non-prescription human drugs · Updated nightly</span>
+        <span class="subtitle">Approved Non-Prescription Human Drugs · Updated Nightly</span>
     </header>
 
     <main>

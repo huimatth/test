@@ -9,12 +9,13 @@ let sortDir         = 'desc';   // 'asc' | 'desc'
 // ── Column definitions ──────────────────────────────────────────────────
 // Maps API keys → display labels and optional renderer
 const COLUMNS = [
-    { key: 'drug_identification_number', label: 'DIN',         cls: 'col-din' },
-    { key: 'brand_name',                 label: 'Brand name',  cls: 'col-brand' },
+    { key: 'drug_identification_number', label: 'DIN',              cls: 'col-din',         link: true },
+    { key: 'brand_name',                 label: 'Brand name',       cls: 'col-brand' },
     { key: 'company_name',               label: 'Company' },
     { key: 'ingredient_name',            label: 'Active ingredients', cls: 'col-ingredients' },
     { key: 'route_of_administration_name', label: 'Route' },
-    { key: 'last_update_date',           label: 'Last updated', cls: 'col-date' },
+    { key: 'last_update_date',           label: 'Last updated',     cls: 'col-date' },
+    { key: 'history_date',               label: 'History date',     cls: 'col-date' },
 ];
 
 // ── Fetch helper ────────────────────────────────────────────────────────
@@ -206,7 +207,17 @@ function renderTable() {
         COLUMNS.forEach(col => {
             const td = row.insertCell();
             if (col.cls) td.className = col.cls;
-            td.textContent = obj[col.key] || '—';
+            const value = obj[col.key] || '—';
+            if (col.link && obj[col.key]) {
+                const a = document.createElement('a');
+                a.href        = `https://health-products.canada.ca/dpd-bdpp/info.do?lang=eng&code=${obj[col.key]}`;
+                a.textContent = value;
+                a.target      = '_blank';
+                a.rel         = 'noopener noreferrer';
+                td.appendChild(a);
+            } else {
+                td.textContent = value;
+            }
         });
     });
 
