@@ -366,6 +366,43 @@
         .stat-badge-approved { background: var(--green-light); color: var(--green); }
         .stat-badge-inactive { background: var(--grey-100);   color: var(--grey-500); }
 
+        /* ── Load-more banner ── */
+        .load-more-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            background: var(--amber-light);
+            border: 1px solid rgba(133,100,4,.2);
+            border-radius: var(--radius);
+            padding: 12px 18px;
+            font-size: 13px;
+            color: var(--amber);
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        .load-more-banner strong { color: var(--grey-900); }
+        .btn-load-more {
+            height: 34px;
+            padding: 0 16px;
+            border-radius: var(--radius);
+            font-size: 13px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            border: 1px solid rgba(133,100,4,.35);
+            background: var(--white);
+            color: var(--amber);
+            white-space: nowrap;
+            transition: all .15s;
+            flex-shrink: 0;
+        }
+        .btn-load-more:hover {
+            background: var(--amber);
+            color: var(--white);
+            border-color: var(--amber);
+        }
+
         /* ── Results meta bar ── */
         .results-meta {
             display: flex;
@@ -755,6 +792,9 @@
                 </div>
             </div>
         </div>
+
+        <!-- ── Load-more banner (shown only when 360-day filter exceeds cap) ── -->
+        <div id="loadMoreBannerContainer"></div>
 
         <!-- ── Results meta bar ── -->
         <div class="results-meta" id="resultsMeta" style="display:none">

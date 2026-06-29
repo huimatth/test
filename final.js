@@ -1,8 +1,10 @@
 // ── State ──────────────────────────────────────────────────────────────
-let allResults      = [];   // full unfiltered dataset (never mutated)
+let allResults      = [];   // loaded dataset (capped at RESULT_CAP on initial load)
+let fullDataset     = null; // null = not yet loaded; array = full set loaded by user
 let filteredResults = [];   // current filtered view
 let currentPage     = 1;
 const PAGE_SIZE     = 25;
+const RESULT_CAP    = 1000; // most recent N products shown on startup
 let sortKey         = 'last_update_date';
 let sortDir         = 'desc';
 
@@ -29,39 +31,19 @@ async function fetchData(uri) {
     return response.json();
 }
 
-// ── Paginated fetch (parallel burst) ─────────────────────────────────────
-// Fetches pages in parallel bursts of BURST_SIZE instead of one-at-a-time,
-// which cuts fetch time ~10x for large endpoints like activeingredient.
+// ── Paginated fetch ───────────────────────────────────────────────────────
 async function fetchAllPages(baseUri) {
-    const limit      = 1000;
-    const BURST_SIZE = 10;
-    const sep        = baseUri.includes('?') ? '&' : '?';
-
-    // Fetch the first page to confirm there's data and seed the result
-    const first = await fetchData(`${baseUri}${sep}limit=${limit}&offset=0`);
-    if (!first || first.length === 0) return [];
-    if (first.length < limit) return first;
-
-    let all    = [...first];
-    let offset = limit;
-
+    const limit = 1000;
+    let offset = 0;
+    let all = [];
     while (true) {
-        // Fire BURST_SIZE page requests simultaneously
-        const offsets = Array.from({ length: BURST_SIZE }, (_, i) => offset + i * limit);
-        const pages   = await Promise.all(
-            offsets.map(o => fetchData(`${baseUri}${sep}limit=${limit}&offset=${o}`))
-        );
-
-        let done = false;
-        for (const page of pages) {
-            if (!page || page.length === 0) { done = true; break; }
-            all = all.concat(page);
-            if (page.length < limit) { done = true; break; }
-        }
-        if (done) break;
-        offset += BURST_SIZE * limit;
+        const sep = baseUri.includes('?') ? '&' : '?';
+        const page = await fetchData(`${baseUri}${sep}limit=${limit}&offset=${offset}`);
+        if (!page || page.length === 0) break;
+        all = all.concat(page);
+        if (page.length < limit) break;
+        offset += limit;
     }
-
     return all;
 }
 
@@ -118,11 +100,19 @@ async function main() {
     try {
         const [part1, part2] = await Promise.all([processPart1(), processPart2()]);
 
-        allResults = part1.map(obj => ({
+        // part1 is sorted newest-first. Cap the initial load at RESULT_CAP.
+        // Store the full merged set in fullDataset only once the user requests it.
+        const merged = part1.map(obj => ({
             ...obj,
             ...(part2[obj.drug_code] || {}),
         }));
 
+        // Keep a reference to the full merged array so loadFullDataset() can use it
+        // without re-fetching. We hide it behind a closure to avoid polluting state
+        // until the user actually requests everything.
+        window._fullMerged = merged;
+
+        allResults      = merged.slice(0, RESULT_CAP);
         filteredResults = [...allResults];
         currentPage     = 1;
         populateRouteDropdown();
@@ -132,6 +122,18 @@ async function main() {
         console.error('Error loading data:', err);
         showError();
     }
+}
+
+// Called by the "Load all N products" button. Promotes the full dataset into
+// allResults, re-runs the active filters, and removes the banner.
+function loadFullDataset() {
+    if (!window._fullMerged) return;
+    fullDataset = window._fullMerged;
+    allResults  = fullDataset;
+    applyFilters();
+    populateRouteDropdown();
+    renderStats();
+    renderLoadMoreBanner(); // will find nothing to show and clear itself
 }
 
 // ── Route dropdown population ─────────────────────────────────────────────
@@ -183,6 +185,7 @@ function applyFilters() {
     renderAll();
     renderPills(companyRaw, ingredientRaw);
     renderStats();
+    renderLoadMoreBanner();
 }
 
 function resetFilters() {
@@ -200,6 +203,7 @@ function resetFilters() {
     renderAll();
     renderPills('', '');
     renderStats();
+    renderLoadMoreBanner();
 }
 
 function clearPill(field) {
@@ -315,7 +319,39 @@ function renderStats() {
     if (statTotal)    statTotal.textContent    = allResults.length.toLocaleString();
 }
 
-// ── CSV Download ──────────────────────────────────────────────────────────
+// ── Load-more banner ──────────────────────────────────────────────────────
+// Shows a banner when the 360-day filter is active, the full dataset hasn't
+// been loaded yet, and there are more results beyond the current cap.
+function renderLoadMoreBanner() {
+    const existing = document.getElementById('loadMoreBanner');
+    const container = document.getElementById('loadMoreBannerContainer');
+    if (!container) return;
+
+    // Conditions to show the banner:
+    // 1. Full dataset not yet loaded
+    // 2. Last 360 days pill is active
+    // 3. The full merged set actually has more records than the cap
+    const totalAvailable = window._fullMerged ? window._fullMerged.length : 0;
+    const shouldShow = fullDataset === null
+        && activeDays === 360
+        && totalAvailable > RESULT_CAP;
+
+    if (!shouldShow) {
+        container.innerHTML = '';
+        return;
+    }
+
+    const extra = totalAvailable - RESULT_CAP;
+    container.innerHTML = `
+        <div id="loadMoreBanner" class="load-more-banner">
+            <span>You're viewing the most recent <strong>${RESULT_CAP.toLocaleString()}</strong> products.
+            The last 360 days contains <strong>${totalAvailable.toLocaleString()}</strong> total
+            (<strong>+${extra.toLocaleString()}</strong> more).</span>
+            <button class="btn-load-more" onclick="loadFullDataset()">
+                Load all ${totalAvailable.toLocaleString()} products
+            </button>
+        </div>`;
+}
 function downloadCSV() {
     const headers = COLUMNS.map(c => c.label);
     const rows = getSorted(filteredResults).map(obj =>
@@ -541,17 +577,11 @@ function closeModal() {
 async function fetchModalData(drugCode, din) {
     const base = 'https://health-products.canada.ca/api/drug';
     try {
-        // Phase 1: fetch the product first so we have company_code for the targeted lookup
-        const product = await fetchData(`${base}/drugproduct/?id=${drugCode}&lang=en&type=json`);
-        const prod    = Array.isArray(product) ? product[0] : product;
-
-        // Phase 2: fetch everything else in parallel, including only the specific company
-        const [ingredients, company, forms, packaging,
+        const [product, ingredients, company, forms, packaging,
                routes, schedules, status, therapeutic] = await Promise.all([
+            fetchData(`${base}/drugproduct/?id=${drugCode}&lang=en&type=json`),
             fetchData(`${base}/activeingredient/?id=${drugCode}&lang=en&type=json`),
-            prod?.company_code
-                ? fetchData(`${base}/company/?id=${prod.company_code}&lang=en&type=json`)
-                : Promise.resolve([]),
+            fetchData(`${base}/company/?lang=en&type=json`),
             fetchData(`${base}/form/?id=${drugCode}&lang=en&type=json`),
             fetchData(`${base}/packaging/?id=${drugCode}&type=json`),
             fetchData(`${base}/route/?id=${drugCode}&lang=en&type=json`),
@@ -560,8 +590,9 @@ async function fetchModalData(drugCode, din) {
             fetchData(`${base}/therapeuticclass/?id=${drugCode}&lang=en&type=json`),
         ]);
 
-        const companyList = Array.isArray(company) ? company : (company ? [company] : []);
-        const comp        = companyList[0] || {};
+        const prod = Array.isArray(product) ? product[0] : product;
+        const companyList = Array.isArray(company) ? company : [company];
+        const comp = companyList.find(c => c.company_code === prod?.company_code) || {};
 
         return buildModalHTML(prod, ingredients, comp, forms, packaging, routes, schedules, status, therapeutic);
     } catch (err) {
