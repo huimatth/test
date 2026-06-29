@@ -29,19 +29,39 @@ async function fetchData(uri) {
     return response.json();
 }
 
-// ── Paginated fetch ───────────────────────────────────────────────────────
+// ── Paginated fetch (parallel burst) ─────────────────────────────────────
+// Fetches pages in parallel bursts of BURST_SIZE instead of one-at-a-time,
+// which cuts fetch time ~10x for large endpoints like activeingredient.
 async function fetchAllPages(baseUri) {
-    const limit = 1000;
-    let offset = 0;
-    let all = [];
+    const limit      = 1000;
+    const BURST_SIZE = 10;
+    const sep        = baseUri.includes('?') ? '&' : '?';
+
+    // Fetch the first page to confirm there's data and seed the result
+    const first = await fetchData(`${baseUri}${sep}limit=${limit}&offset=0`);
+    if (!first || first.length === 0) return [];
+    if (first.length < limit) return first;
+
+    let all    = [...first];
+    let offset = limit;
+
     while (true) {
-        const sep = baseUri.includes('?') ? '&' : '?';
-        const page = await fetchData(`${baseUri}${sep}limit=${limit}&offset=${offset}`);
-        if (!page || page.length === 0) break;
-        all = all.concat(page);
-        if (page.length < limit) break;
-        offset += limit;
+        // Fire BURST_SIZE page requests simultaneously
+        const offsets = Array.from({ length: BURST_SIZE }, (_, i) => offset + i * limit);
+        const pages   = await Promise.all(
+            offsets.map(o => fetchData(`${baseUri}${sep}limit=${limit}&offset=${o}`))
+        );
+
+        let done = false;
+        for (const page of pages) {
+            if (!page || page.length === 0) { done = true; break; }
+            all = all.concat(page);
+            if (page.length < limit) { done = true; break; }
+        }
+        if (done) break;
+        offset += BURST_SIZE * limit;
     }
+
     return all;
 }
 
@@ -521,11 +541,17 @@ function closeModal() {
 async function fetchModalData(drugCode, din) {
     const base = 'https://health-products.canada.ca/api/drug';
     try {
-        const [product, ingredients, company, forms, packaging,
+        // Phase 1: fetch the product first so we have company_code for the targeted lookup
+        const product = await fetchData(`${base}/drugproduct/?id=${drugCode}&lang=en&type=json`);
+        const prod    = Array.isArray(product) ? product[0] : product;
+
+        // Phase 2: fetch everything else in parallel, including only the specific company
+        const [ingredients, company, forms, packaging,
                routes, schedules, status, therapeutic] = await Promise.all([
-            fetchData(`${base}/drugproduct/?id=${drugCode}&lang=en&type=json`),
             fetchData(`${base}/activeingredient/?id=${drugCode}&lang=en&type=json`),
-            fetchData(`${base}/company/?lang=en&type=json`),
+            prod?.company_code
+                ? fetchData(`${base}/company/?id=${prod.company_code}&lang=en&type=json`)
+                : Promise.resolve([]),
             fetchData(`${base}/form/?id=${drugCode}&lang=en&type=json`),
             fetchData(`${base}/packaging/?id=${drugCode}&type=json`),
             fetchData(`${base}/route/?id=${drugCode}&lang=en&type=json`),
@@ -534,9 +560,8 @@ async function fetchModalData(drugCode, din) {
             fetchData(`${base}/therapeuticclass/?id=${drugCode}&lang=en&type=json`),
         ]);
 
-        const prod = Array.isArray(product) ? product[0] : product;
-        const companyList = Array.isArray(company) ? company : [company];
-        const comp = companyList.find(c => c.company_code === prod?.company_code) || {};
+        const companyList = Array.isArray(company) ? company : (company ? [company] : []);
+        const comp        = companyList[0] || {};
 
         return buildModalHTML(prod, ingredients, comp, forms, packaging, routes, schedules, status, therapeutic);
     } catch (err) {
