@@ -4,31 +4,51 @@ let filteredResults = [];   // current filtered view
 let currentPage     = 1;
 const PAGE_SIZE     = 25;
 let sortKey         = 'last_update_date';
-let sortDir         = 'desc';   // 'asc' | 'desc'
+let sortDir         = 'desc';
 
-// ── Column definitions ──────────────────────────────────────────────────
-// Maps API keys → display labels and optional renderer
+// Active filter state
+let activeStatus = 'all';  // 'all' | 'approved' | 'inactive'
+let activeDays   = null;   // null | 90 | 180 | 360
+let activeRoute  = '';     // '' | route string
+
+// ── Column definitions ───────────────────────────────────────────────────
 const COLUMNS = [
-    { key: 'drug_identification_number', label: 'DIN',               cls: 'col-din',         modal: true },
-    { key: 'brand_name',                 label: 'Brand name',        cls: 'col-brand' },
+    { key: 'drug_identification_number', label: 'DIN',                cls: 'col-din',         modal: true },
+    { key: 'brand_name',                 label: 'Brand name',         cls: 'col-brand' },
     { key: 'company_name',               label: 'Company' },
     { key: 'ingredient_name',            label: 'Active ingredients', cls: 'col-ingredients' },
     { key: 'route_of_administration_name', label: 'Route' },
-    { key: 'last_update_date',           label: 'Last updated',      cls: 'col-date' },
-    { key: 'history_date',               label: 'History date',      cls: 'col-date' },
+    { key: 'last_update_date',           label: 'Last updated',       cls: 'col-date' },
+    { key: 'history_date',               label: 'History date',       cls: 'col-date' },
 ];
 
-// ── Fetch helper ────────────────────────────────────────────────────────
+// ── Fetch helper ─────────────────────────────────────────────────────────
 async function fetchData(uri) {
     const response = await fetch(uri);
     if (!response.ok) throw new Error(`HTTP ${response.status} for ${uri}`);
     return response.json();
 }
 
-// ── Data loading ─────────────────────────────────────────────────────────
+// ── Paginated fetch ───────────────────────────────────────────────────────
+async function fetchAllPages(baseUri) {
+    const limit = 1000;
+    let offset = 0;
+    let all = [];
+    while (true) {
+        const sep = baseUri.includes('?') ? '&' : '?';
+        const page = await fetchData(`${baseUri}${sep}limit=${limit}&offset=${offset}`);
+        if (!page || page.length === 0) break;
+        all = all.concat(page);
+        if (page.length < limit) break;
+        offset += limit;
+    }
+    return all;
+}
+
+// ── Data loading ──────────────────────────────────────────────────────────
 async function processPart1() {
     const [drugProducts, statuses, schedules, routes] = await Promise.all([
-        fetchData('https://health-products.canada.ca/api/drug/drugproduct/?status=1&lang=en&type=json'),
+        fetchAllPages('https://health-products.canada.ca/api/drug/drugproduct/?status=1&lang=en&type=json'),
         fetchData('https://health-products.canada.ca/api/drug/status/?lang=en&type=json'),
         fetchData('https://health-products.canada.ca/api/drug/schedule/?lang=en&type=json'),
         fetchData('https://health-products.canada.ca/api/drug/route/?lang=en&type=json'),
@@ -53,7 +73,7 @@ async function processPart1() {
 }
 
 async function processPart2() {
-    const activeIngredients = await fetchData(
+    const activeIngredients = await fetchAllPages(
         'https://health-products.canada.ca/api/drug/activeingredient/?lang=en&type=json'
     );
 
@@ -64,7 +84,6 @@ async function processPart2() {
         byCode[code].push(ing);
     });
 
-    // Collapse each drug's ingredients into a single readable string
     const collapsed = {};
     Object.entries(byCode).forEach(([code, ings]) => {
         collapsed[code] = {
@@ -86,48 +105,131 @@ async function main() {
 
         filteredResults = [...allResults];
         currentPage     = 1;
+        populateRouteDropdown();
         renderAll();
+        renderStats();
     } catch (err) {
         console.error('Error loading data:', err);
         showError();
     }
 }
 
-// ── Filtering ───────────────────────────────────────────────────────────
+// ── Route dropdown population ─────────────────────────────────────────────
+function populateRouteDropdown() {
+    const routes = [...new Set(
+        allResults
+            .map(r => r.route_of_administration_name)
+            .filter(Boolean)
+    )].sort();
+
+    const sel = document.getElementById('routeFilter');
+    sel.innerHTML = '<option value="">All routes</option>';
+    routes.forEach(r => {
+        const opt = document.createElement('option');
+        opt.value = r;
+        opt.textContent = r;
+        sel.appendChild(opt);
+    });
+}
+
+// ── Filtering ─────────────────────────────────────────────────────────────
 function applyFilters() {
     const companyRaw    = document.getElementById('companyFilter').value.trim();
     const ingredientRaw = document.getElementById('ingredientFilter').value.trim();
     const company       = companyRaw.toLowerCase();
     const ingredient    = ingredientRaw.toLowerCase();
+    const quickRaw      = document.getElementById('quickFilter').value.trim();
+    const quick         = quickRaw.toLowerCase();
+    activeRoute         = document.getElementById('routeFilter').value;
 
-    // Always filter from the full dataset — fixes the cumulative-filter bug
+    const cutoff = activeDays
+        ? new Date(Date.now() - activeDays * 86400000)
+        : null;
+
     filteredResults = allResults.filter(obj => {
         const matchCompany    = !company    || (obj.company_name    || '').toLowerCase().includes(company);
         const matchIngredient = !ingredient || (obj.ingredient_name || '').toLowerCase().includes(ingredient);
-        return matchCompany && matchIngredient;
+        const matchRoute      = !activeRoute || obj.route_of_administration_name === activeRoute;
+        const matchDate       = !cutoff || (obj.last_update_date && new Date(obj.last_update_date) >= cutoff);
+        const matchQuick      = !quick || [
+            obj.brand_name, obj.company_name, obj.ingredient_name,
+            obj.route_of_administration_name, obj.drug_identification_number
+        ].some(f => (f || '').toLowerCase().includes(quick));
+
+        return matchCompany && matchIngredient && matchRoute && matchDate && matchQuick;
     });
 
     currentPage = 1;
     renderAll();
     renderPills(companyRaw, ingredientRaw);
+    renderStats();
 }
 
 function resetFilters() {
     document.getElementById('companyFilter').value    = '';
     document.getElementById('ingredientFilter').value = '';
+    document.getElementById('quickFilter').value      = '';
+    document.getElementById('routeFilter').value      = '';
+    activeStatus = 'all';
+    activeDays   = null;
+    activeRoute  = '';
+    updateStatusPills();
+    updateDayPills();
     filteredResults = [...allResults];
     currentPage     = 1;
     renderAll();
     renderPills('', '');
+    renderStats();
 }
 
-// Clear one pill individually
 function clearPill(field) {
-    document.getElementById(field).value = '';
+    if (field === '_days') {
+        activeDays = null;
+        updateDayPills();
+    } else if (field === '_status') {
+        activeStatus = 'all';
+        updateStatusPills();
+    } else if (field === '_route') {
+        document.getElementById('routeFilter').value = '';
+        activeRoute = '';
+    } else {
+        document.getElementById(field).value = '';
+    }
     applyFilters();
 }
 
-// ── Sorting ─────────────────────────────────────────────────────────────
+// ── Status pills ──────────────────────────────────────────────────────────
+function setStatus(val) {
+    activeStatus = val;
+    updateStatusPills();
+    applyFilters();
+}
+
+function updateStatusPills() {
+    document.querySelectorAll('.status-pill').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.status === activeStatus);
+    });
+}
+
+// ── Day pills ─────────────────────────────────────────────────────────────
+function setDays(days) {
+    activeDays = activeDays === days ? null : days;
+    updateDayPills();
+    applyFilters();
+}
+
+function updateDayPills() {
+    document.querySelectorAll('.day-pill').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.days) === activeDays);
+    });
+}
+
+// ── Quick filter (live) ───────────────────────────────────────────────────
+function onQuickInput() {
+    applyFilters();
+}
+
+// ── Sorting ───────────────────────────────────────────────────────────────
 function toggleSort(key) {
     if (sortKey === key) {
         sortDir = sortDir === 'asc' ? 'desc' : 'asc';
@@ -148,7 +250,71 @@ function getSorted(data) {
     });
 }
 
-// ── Rendering ───────────────────────────────────────────────────────────
+// ── Stats panels ──────────────────────────────────────────────────────────
+function renderStats() {
+    const cutoff = activeDays ? new Date(Date.now() - activeDays * 86400000) : null;
+    const inWindow = cutoff
+        ? allResults.filter(r => r.last_update_date && new Date(r.last_update_date) >= cutoff).length
+        : allResults.length;
+
+    const statInWindow = document.getElementById('statInWindow');
+    if (statInWindow) statInWindow.textContent = inWindow.toLocaleString();
+
+    const statFiltered = document.getElementById('statFiltered');
+    if (statFiltered) statFiltered.textContent = filteredResults.length.toLocaleString();
+
+    // By route: count unique routes in filtered set
+    const routeCounts = {};
+    filteredResults.forEach(r => {
+        const rt = r.route_of_administration_name || 'Unknown';
+        routeCounts[rt] = (routeCounts[rt] || 0) + 1;
+    });
+    const topRoutes = Object.entries(routeCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5);
+
+    const routeEl = document.getElementById('statRoutes');
+    if (routeEl) {
+        if (topRoutes.length === 0) {
+            routeEl.innerHTML = '<span style="color:var(--grey-300)">—</span>';
+        } else {
+            routeEl.innerHTML = topRoutes.map(([r, c]) =>
+                `<div class="stat-route-row"><span class="stat-route-name">${r}</span><span class="stat-route-count">${c.toLocaleString()}</span></div>`
+            ).join('');
+        }
+    }
+
+    // Status breakdown of loaded data
+    const approved = allResults.filter(r => (r.status || '').toLowerCase() === 'approved').length;
+    const inactive = allResults.length - approved;
+    const statApproved = document.getElementById('statStatusApproved');
+    const statInactive = document.getElementById('statStatusInactive');
+    const statTotal    = document.getElementById('statTotal');
+    if (statApproved) statApproved.textContent = approved.toLocaleString();
+    if (statInactive) statInactive.textContent = inactive.toLocaleString();
+    if (statTotal)    statTotal.textContent    = allResults.length.toLocaleString();
+}
+
+// ── CSV Download ──────────────────────────────────────────────────────────
+function downloadCSV() {
+    const headers = COLUMNS.map(c => c.label);
+    const rows = getSorted(filteredResults).map(obj =>
+        COLUMNS.map(c => {
+            const v = obj[c.key] || '';
+            return `"${String(v).replace(/"/g, '""')}"`;
+        }).join(',')
+    );
+    const csv  = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = 'drug_products.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────
 function renderAll() {
     renderResultsMeta();
     renderTable();
@@ -158,8 +324,8 @@ function renderAll() {
 function renderResultsMeta() {
     const meta  = document.getElementById('resultsMeta');
     const count = document.getElementById('resultsCount');
-    meta.style.display  = 'flex';
-    count.innerHTML = `Showing <strong>${filteredResults.length.toLocaleString()}</strong> of <strong>${allResults.length.toLocaleString()}</strong> products`;
+    if (meta)  meta.style.display = 'flex';
+    if (count) count.innerHTML = `Showing <strong>${filteredResults.length.toLocaleString()}</strong> of <strong>${allResults.length.toLocaleString()}</strong> products`;
 }
 
 function renderTable() {
@@ -175,8 +341,8 @@ function renderTable() {
         return;
     }
 
-    const sorted  = getSorted(filteredResults);
-    const start   = (currentPage - 1) * PAGE_SIZE;
+    const sorted   = getSorted(filteredResults);
+    const start    = (currentPage - 1) * PAGE_SIZE;
     const pageData = sorted.slice(start, start + PAGE_SIZE);
 
     const wrapper = document.createElement('div');
@@ -187,7 +353,6 @@ function renderTable() {
 
     const table = document.createElement('table');
 
-    // Header
     const thead = table.createTHead();
     const headerRow = thead.insertRow();
     COLUMNS.forEach(col => {
@@ -200,7 +365,6 @@ function renderTable() {
         headerRow.appendChild(th);
     });
 
-    // Body
     const tbody = document.createElement('tbody');
     pageData.forEach(obj => {
         const row = tbody.insertRow();
@@ -246,21 +410,20 @@ function renderPagination() {
 
     container.appendChild(makeBtn('←', currentPage - 1, currentPage === 1, false));
 
-    // Show a sliding window of page numbers
-    const window_size = 5;
-    let start = Math.max(1, currentPage - Math.floor(window_size / 2));
-    let end   = Math.min(totalPages, start + window_size - 1);
-    if (end - start + 1 < window_size) start = Math.max(1, end - window_size + 1);
+    const win = 5;
+    let wStart = Math.max(1, currentPage - Math.floor(win / 2));
+    let wEnd   = Math.min(totalPages, wStart + win - 1);
+    if (wEnd - wStart + 1 < win) wStart = Math.max(1, wEnd - win + 1);
 
-    if (start > 1) {
+    if (wStart > 1) {
         container.appendChild(makeBtn('1', 1, false, false));
-        if (start > 2) { const el = document.createElement('span'); el.textContent = '…'; el.style.padding = '0 4px'; el.style.color = 'var(--grey-300)'; container.appendChild(el); }
+        if (wStart > 2) { const el = document.createElement('span'); el.textContent = '…'; el.style.cssText = 'padding:0 4px;color:var(--grey-300)'; container.appendChild(el); }
     }
-    for (let p = start; p <= end; p++) {
+    for (let p = wStart; p <= wEnd; p++) {
         container.appendChild(makeBtn(p, p, false, p === currentPage));
     }
-    if (end < totalPages) {
-        if (end < totalPages - 1) { const el = document.createElement('span'); el.textContent = '…'; el.style.padding = '0 4px'; el.style.color = 'var(--grey-300)'; container.appendChild(el); }
+    if (wEnd < totalPages) {
+        if (wEnd < totalPages - 1) { const el = document.createElement('span'); el.textContent = '…'; el.style.cssText = 'padding:0 4px;color:var(--grey-300)'; container.appendChild(el); }
         container.appendChild(makeBtn(totalPages, totalPages, false, false));
     }
 
@@ -278,11 +441,13 @@ function renderPills(company, ingredient) {
         pillsContainer.appendChild(pill);
     };
 
-    if (company)    addPill(`Company: ${company}`,         'companyFilter');
-    if (ingredient) addPill(`Ingredient: ${ingredient}`,   'ingredientFilter');
+    if (company)    addPill(`Company: ${company}`,       'companyFilter');
+    if (ingredient) addPill(`Ingredient: ${ingredient}`, 'ingredientFilter');
+    if (activeRoute) addPill(`Route: ${activeRoute}`,    '_route');
+    if (activeDays)  addPill(`Last ${activeDays} days`,  '_days');
 }
 
-// ── Loading / error states ───────────────────────────────────────────────
+// ── Loading / error states ────────────────────────────────────────────────
 function showLoading() {
     document.getElementById('table-container').innerHTML = `
         <div class="loading-state">
@@ -301,17 +466,18 @@ function showError() {
         </div>`;
 }
 
-// ── Live filtering on Enter ──────────────────────────────────────────────
+// ── Boot ──────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     ['companyFilter', 'ingredientFilter'].forEach(id => {
         document.getElementById(id).addEventListener('keydown', e => {
             if (e.key === 'Enter') applyFilters();
         });
     });
+    document.getElementById('quickFilter').addEventListener('input', onQuickInput);
     main();
 });
 
-// ── Modal ────────────────────────────────────────────────────────────────
+// ── Modal ─────────────────────────────────────────────────────────────────
 function openModal(obj) {
     const root = document.getElementById('modal-root');
     const din  = obj.drug_identification_number;
@@ -336,11 +502,9 @@ function openModal(obj) {
             </div>
         </div>`;
 
-    // Close on backdrop click
     document.getElementById('modalBackdrop').addEventListener('click', e => {
         if (e.target === e.currentTarget) closeModal();
     });
-    // Close on Escape
     document._modalEsc = (e) => { if (e.key === 'Escape') closeModal(); };
     document.addEventListener('keydown', document._modalEsc);
 
@@ -361,7 +525,7 @@ async function fetchModalData(drugCode, din) {
                routes, schedules, status, therapeutic] = await Promise.all([
             fetchData(`${base}/drugproduct/?id=${drugCode}&lang=en&type=json`),
             fetchData(`${base}/activeingredient/?id=${drugCode}&lang=en&type=json`),
-            fetchData(`${base}/company/?lang=en&type=json`),          // filtered below by company_code
+            fetchData(`${base}/company/?lang=en&type=json`),
             fetchData(`${base}/form/?id=${drugCode}&lang=en&type=json`),
             fetchData(`${base}/packaging/?id=${drugCode}&type=json`),
             fetchData(`${base}/route/?id=${drugCode}&lang=en&type=json`),
@@ -370,10 +534,7 @@ async function fetchModalData(drugCode, din) {
             fetchData(`${base}/therapeuticclass/?id=${drugCode}&lang=en&type=json`),
         ]);
 
-        // product may be an object or single-element array
         const prod = Array.isArray(product) ? product[0] : product;
-
-        // Find company details matching the product's company_code
         const companyList = Array.isArray(company) ? company : [company];
         const comp = companyList.find(c => c.company_code === prod?.company_code) || {};
 
@@ -389,45 +550,42 @@ function val(v) {
     return v;
 }
 
-function field(label, value) {
+function mfield(label, value) {
     return `<div class="modal-field"><label>${label}</label><span>${val(value)}</span></div>`;
 }
 
 function buildModalHTML(prod, ingredients, comp, forms, packaging, routes, schedules, status, therapeutic) {
     const sections = [];
 
-    // ── Product overview ──
     sections.push(`
         <div class="modal-section">
             <div class="modal-section-title">Product overview</div>
             <div class="modal-grid">
-                ${field('DIN',         prod?.drug_identification_number)}
-                ${field('Brand name',  prod?.brand_name)}
-                ${field('Class',       prod?.class_name)}
-                ${field('Descriptor',  prod?.descriptor)}
-                ${field('AI group #',  prod?.ai_group_no)}
-                ${field('Last updated', prod?.last_update_date)}
+                ${mfield('DIN',          prod?.drug_identification_number)}
+                ${mfield('Brand name',   prod?.brand_name)}
+                ${mfield('Class',        prod?.class_name)}
+                ${mfield('Descriptor',   prod?.descriptor)}
+                ${mfield('AI group #',   prod?.ai_group_no)}
+                ${mfield('Last updated', prod?.last_update_date)}
             </div>
         </div>`);
 
-    // ── Company ──
     if (comp?.company_name) {
         sections.push(`
             <div class="modal-section">
                 <div class="modal-section-title">Company</div>
                 <div class="modal-grid">
-                    ${field('Name',     comp.company_name)}
-                    ${field('Type',     comp.company_type)}
-                    ${field('Address',  [comp.street_name, comp.suite_number].filter(Boolean).join(', '))}
-                    ${field('City',     comp.city_name)}
-                    ${field('Province', comp.province_name)}
-                    ${field('Postal code', comp.postal_code)}
-                    ${field('Country',  comp.country_name)}
+                    ${mfield('Name',        comp.company_name)}
+                    ${mfield('Type',        comp.company_type)}
+                    ${mfield('Address',     [comp.street_name, comp.suite_number].filter(Boolean).join(', '))}
+                    ${mfield('City',        comp.city_name)}
+                    ${mfield('Province',    comp.province_name)}
+                    ${mfield('Postal code', comp.postal_code)}
+                    ${mfield('Country',     comp.country_name)}
                 </div>
             </div>`);
     }
 
-    // ── Active ingredients ──
     const ings = Array.isArray(ingredients) ? ingredients : (ingredients ? [ingredients] : []);
     if (ings.length > 0) {
         const rows = ings.map(i => `
@@ -446,43 +604,39 @@ function buildModalHTML(prod, ingredients, comp, forms, packaging, routes, sched
             </div>`);
     }
 
-    // ── Dosage forms ──
     const formList = Array.isArray(forms) ? forms : (forms ? [forms] : []);
     if (formList.length > 0) {
         sections.push(`
             <div class="modal-section">
                 <div class="modal-section-title">Dosage form</div>
                 <div class="modal-grid">
-                    ${formList.map(f => field('Form', f.pharmaceutical_form_name)).join('')}
+                    ${formList.map(f => mfield('Form', f.pharmaceutical_form_name)).join('')}
                 </div>
             </div>`);
     }
 
-    // ── Routes of administration ──
     const routeList = Array.isArray(routes) ? routes : (routes ? [routes] : []);
     if (routeList.length > 0) {
         sections.push(`
             <div class="modal-section">
                 <div class="modal-section-title">Route of administration</div>
                 <div class="modal-grid">
-                    ${routeList.map(r => field('Route', r.route_of_administration_name)).join('')}
+                    ${routeList.map(r => mfield('Route', r.route_of_administration_name)).join('')}
                 </div>
             </div>`);
     }
 
-    // ── Schedule ──
     const schedList = Array.isArray(schedules) ? schedules : (schedules ? [schedules] : []);
     if (schedList.length > 0) {
         sections.push(`
             <div class="modal-section">
                 <div class="modal-section-title">Schedule</div>
                 <div class="modal-grid">
-                    ${schedList.map(s => field('Schedule', s.schedule_name)).join('')}
+                    ${schedList.map(s => mfield('Schedule', s.schedule_name)).join('')}
                 </div>
             </div>`);
     }
 
-    // ── Status history ──
     const statusList = Array.isArray(status) ? status : (status ? [status] : []);
     if (statusList.length > 0) {
         const rows = statusList.map(s => `
@@ -502,19 +656,17 @@ function buildModalHTML(prod, ingredients, comp, forms, packaging, routes, sched
             </div>`);
     }
 
-    // ── Therapeutic class ──
     const tcList = Array.isArray(therapeutic) ? therapeutic : (therapeutic ? [therapeutic] : []);
     if (tcList.length > 0) {
         sections.push(`
             <div class="modal-section">
                 <div class="modal-section-title">Therapeutic class</div>
                 <div class="modal-grid">
-                    ${tcList.map(t => field(`${val(t.tc_atc_number)}`, t.tc_atc)).join('')}
+                    ${tcList.map(t => mfield(`${val(t.tc_atc_number)}`, t.tc_atc)).join('')}
                 </div>
             </div>`);
     }
 
-    // ── Packaging ──
     const packList = Array.isArray(packaging) ? packaging : (packaging ? [packaging] : []);
     const packFiltered = packList.filter(p => p.product_information || p.package_type || p.package_size);
     if (packFiltered.length > 0) {
@@ -522,7 +674,7 @@ function buildModalHTML(prod, ingredients, comp, forms, packaging, routes, sched
             <div class="modal-section">
                 <div class="modal-section-title">Packaging</div>
                 <div class="modal-grid">
-                    ${packFiltered.map(p => field('Package info', p.product_information || [p.package_size, p.package_size_unit, p.package_type].filter(Boolean).join(' '))).join('')}
+                    ${packFiltered.map(p => mfield('Package info', p.product_information || [p.package_size, p.package_size_unit, p.package_type].filter(Boolean).join(' '))).join('')}
                 </div>
             </div>`);
     }
