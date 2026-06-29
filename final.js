@@ -1,56 +1,34 @@
 // ── State ──────────────────────────────────────────────────────────────
-let allResults      = [];   // loaded dataset (capped at RESULT_CAP on initial load)
-let fullDataset     = null; // null = not yet loaded; array = full set loaded by user
+let allResults      = [];   // full unfiltered dataset (never mutated)
 let filteredResults = [];   // current filtered view
 let currentPage     = 1;
 const PAGE_SIZE     = 25;
-const RESULT_CAP    = 1000; // most recent N products shown on startup
 let sortKey         = 'last_update_date';
-let sortDir         = 'desc';
+let sortDir         = 'desc';   // 'asc' | 'desc'
 
-// Active filter state
-let activeStatus = 'all';  // 'all' | 'approved' | 'inactive'
-let activeDays   = null;   // null | 90 | 180 | 360
-let activeRoute  = '';     // '' | route string
-
-// ── Column definitions ───────────────────────────────────────────────────
+// ── Column definitions ──────────────────────────────────────────────────
+// Maps API keys → display labels and optional renderer
 const COLUMNS = [
-    { key: 'drug_identification_number', label: 'DIN',                cls: 'col-din',         modal: true },
-    { key: 'brand_name',                 label: 'Brand name',         cls: 'col-brand' },
+    { key: 'drug_identification_number', label: 'DIN',               cls: 'col-din',         modal: true },
+    { key: 'brand_name',                 label: 'Brand name',        cls: 'col-brand' },
     { key: 'company_name',               label: 'Company' },
     { key: 'ingredient_name',            label: 'Active ingredients', cls: 'col-ingredients' },
     { key: 'route_of_administration_name', label: 'Route' },
-    { key: 'last_update_date',           label: 'Last updated',       cls: 'col-date' },
-    { key: 'history_date',               label: 'History date',       cls: 'col-date' },
+    { key: 'last_update_date',           label: 'Last updated',      cls: 'col-date' },
+    { key: 'history_date',               label: 'History date',      cls: 'col-date' },
 ];
 
-// ── Fetch helper ─────────────────────────────────────────────────────────
+// ── Fetch helper ────────────────────────────────────────────────────────
 async function fetchData(uri) {
     const response = await fetch(uri);
     if (!response.ok) throw new Error(`HTTP ${response.status} for ${uri}`);
     return response.json();
 }
 
-// ── Paginated fetch ───────────────────────────────────────────────────────
-async function fetchAllPages(baseUri) {
-    const limit = 1000;
-    let offset = 0;
-    let all = [];
-    while (true) {
-        const sep = baseUri.includes('?') ? '&' : '?';
-        const page = await fetchData(`${baseUri}${sep}limit=${limit}&offset=${offset}`);
-        if (!page || page.length === 0) break;
-        all = all.concat(page);
-        if (page.length < limit) break;
-        offset += limit;
-    }
-    return all;
-}
-
-// ── Data loading ──────────────────────────────────────────────────────────
+// ── Data loading ─────────────────────────────────────────────────────────
 async function processPart1() {
     const [drugProducts, statuses, schedules, routes] = await Promise.all([
-        fetchAllPages('https://health-products.canada.ca/api/drug/drugproduct/?status=1&lang=en&type=json'),
+        fetchData('https://health-products.canada.ca/api/drug/drugproduct/?status=1&lang=en&type=json'),
         fetchData('https://health-products.canada.ca/api/drug/status/?lang=en&type=json'),
         fetchData('https://health-products.canada.ca/api/drug/schedule/?lang=en&type=json'),
         fetchData('https://health-products.canada.ca/api/drug/route/?lang=en&type=json'),
@@ -75,7 +53,7 @@ async function processPart1() {
 }
 
 async function processPart2() {
-    const activeIngredients = await fetchAllPages(
+    const activeIngredients = await fetchData(
         'https://health-products.canada.ca/api/drug/activeingredient/?lang=en&type=json'
     );
 
@@ -86,6 +64,7 @@ async function processPart2() {
         byCode[code].push(ing);
     });
 
+    // Collapse each drug's ingredients into a single readable string
     const collapsed = {};
     Object.entries(byCode).forEach(([code, ings]) => {
         collapsed[code] = {
@@ -100,167 +79,55 @@ async function main() {
     try {
         const [part1, part2] = await Promise.all([processPart1(), processPart2()]);
 
-        const merged = part1.map(obj => ({
+        allResults = part1.map(obj => ({
             ...obj,
             ...(part2[obj.drug_code] || {}),
         }));
 
-        window._fullMerged = merged;
-
-        allResults      = merged.slice(0, RESULT_CAP);
         filteredResults = [...allResults];
         currentPage     = 1;
-        populateRouteDropdown();
         renderAll();
-        renderStats();
     } catch (err) {
         console.error('Error loading data:', err);
         showError();
     }
 }
 
-function loadFullDataset() {
-    if (!window._fullMerged) return;
-    fullDataset = window._fullMerged;
-    allResults  = fullDataset;
-    applyFilters();
-    populateRouteDropdown();
-    renderStats();
-    renderLoadMoreBanner();
-}
-
-// ── Route dropdown population ─────────────────────────────────────────────
-function populateRouteDropdown() {
-    const routes = [...new Set(
-        allResults
-            .map(r => r.route_of_administration_name)
-            .filter(Boolean)
-    )].sort();
-
-    const sel = document.getElementById('routeFilter');
-    if (!sel) return;
-    sel.innerHTML = '<option value="">All routes</option>';
-    routes.forEach(r => {
-        const opt = document.createElement('option');
-        opt.value = r;
-        opt.textContent = r;
-        sel.appendChild(opt);
-    });
-}
-
-// ── Filtering ─────────────────────────────────────────────────────────────
+// ── Filtering ───────────────────────────────────────────────────────────
 function applyFilters() {
-    const companyFilter = document.getElementById('companyFilter');
-    const ingredientFilter = document.getElementById('ingredientFilter');
-    const quickFilter = document.getElementById('quickFilter');
-    const routeFilter = document.getElementById('routeFilter');
-
-    const companyRaw    = companyFilter ? companyFilter.value.trim() : '';
-    const ingredientRaw = ingredientFilter ? ingredientFilter.value.trim() : '';
+    const companyRaw    = document.getElementById('companyFilter').value.trim();
+    const ingredientRaw = document.getElementById('ingredientFilter').value.trim();
     const company       = companyRaw.toLowerCase();
     const ingredient    = ingredientRaw.toLowerCase();
-    const quickRaw      = quickFilter ? quickFilter.value.trim() : '';
-    const quick         = quickRaw.toLowerCase();
-    activeRoute         = routeFilter ? routeFilter.value : '';
 
-    const cutoff = activeDays
-        ? new Date(Date.now() - activeDays * 86400000)
-        : null;
-
+    // Always filter from the full dataset — fixes the cumulative-filter bug
     filteredResults = allResults.filter(obj => {
         const matchCompany    = !company    || (obj.company_name    || '').toLowerCase().includes(company);
         const matchIngredient = !ingredient || (obj.ingredient_name || '').toLowerCase().includes(ingredient);
-        const matchRoute      = !activeRoute || obj.route_of_administration_name === activeRoute;
-        const matchDate       = !cutoff || (obj.last_update_date && new Date(obj.last_update_date) >= cutoff);
-        const matchQuick      = !quick || [
-            obj.brand_name, obj.company_name, obj.ingredient_name,
-            obj.route_of_administration_name, obj.drug_identification_number
-        ].some(f => (f || '').toLowerCase().includes(quick));
-
-        return matchCompany && matchIngredient && matchRoute && matchDate && matchQuick;
+        return matchCompany && matchIngredient;
     });
 
     currentPage = 1;
     renderAll();
     renderPills(companyRaw, ingredientRaw);
-    renderStats();
-    renderLoadMoreBanner();
 }
 
 function resetFilters() {
-    const companyFilter = document.getElementById('companyFilter');
-    const ingredientFilter = document.getElementById('ingredientFilter');
-    const quickFilter = document.getElementById('quickFilter');
-    const routeFilter = document.getElementById('routeFilter');
-
-    if (companyFilter) companyFilter.value = '';
-    if (ingredientFilter) ingredientFilter.value = '';
-    if (quickFilter) quickFilter.value = '';
-    if (routeFilter) routeFilter.value = '';
-
-    activeStatus = 'all';
-    activeDays   = null;
-    activeRoute  = '';
-    updateStatusPills();
-    updateDayPills();
+    document.getElementById('companyFilter').value    = '';
+    document.getElementById('ingredientFilter').value = '';
     filteredResults = [...allResults];
     currentPage     = 1;
     renderAll();
     renderPills('', '');
-    renderStats();
-    renderLoadMoreBanner();
 }
 
+// Clear one pill individually
 function clearPill(field) {
-    if (field === '_days') {
-        activeDays = null;
-        updateDayPills();
-    } else if (field === '_status') {
-        activeStatus = 'all';
-        updateStatusPills();
-    } else if (field === '_route') {
-        const routeFilter = document.getElementById('routeFilter');
-        if (routeFilter) routeFilter.value = '';
-        activeRoute = '';
-    } else {
-        const inputEl = document.getElementById(field);
-        if (inputEl) inputEl.value = '';
-    }
+    document.getElementById(field).value = '';
     applyFilters();
 }
 
-// ── Status pills ──────────────────────────────────────────────────────────
-function setStatus(val) {
-    activeStatus = val;
-    updateStatusPills();
-    applyFilters();
-}
-
-function updateStatusPills() {
-    document.querySelectorAll('.status-pill').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.status === activeStatus);
-    });
-}
-
-// ── Day pills ─────────────────────────────────────────────────────────────
-function setDays(days) {
-    activeDays = activeDays === days ? null : days;
-    updateDayPills();
-    applyFilters();
-}
-
-function updateDayPills() {
-    document.querySelectorAll('.day-pill').forEach(btn => {
-        btn.classList.toggle('active', parseInt(btn.dataset.days) === activeDays);
-    });
-}
-
-// ── Quick filter (live) ───────────────────────────────────────────────────
-function onQuickInput() {
-    applyFilters();
-}
-
-// ── Sorting ───────────────────────────────────────────────────────────────
+// ── Sorting ─────────────────────────────────────────────────────────────
 function toggleSort(key) {
     if (sortKey === key) {
         sortDir = sortDir === 'asc' ? 'desc' : 'asc';
@@ -281,95 +148,7 @@ function getSorted(data) {
     });
 }
 
-// ── Stats panels ──────────────────────────────────────────────────────────
-function renderStats() {
-    const cutoff = activeDays ? new Date(Date.now() - activeDays * 86400000) : null;
-    const inWindow = cutoff
-        ? allResults.filter(r => r.last_update_date && new Date(r.last_update_date) >= cutoff).length
-        : allResults.length;
-
-    const statInWindow = document.getElementById('statInWindow');
-    if (statInWindow) statInWindow.textContent = inWindow.toLocaleString();
-
-    const statFiltered = document.getElementById('statFiltered');
-    if (statFiltered) statFiltered.textContent = filteredResults.length.toLocaleString();
-
-    const routeCounts = {};
-    filteredResults.forEach(r => {
-        const rt = r.route_of_administration_name || 'Unknown';
-        routeCounts[rt] = (routeCounts[rt] || 0) + 1;
-    });
-    const topRoutes = Object.entries(routeCounts)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5);
-
-    const routeEl = document.getElementById('statRoutes');
-    if (routeEl) {
-        if (topRoutes.length === 0) {
-            routeEl.innerHTML = '<span style="color:var(--grey-300)">—</span>';
-        } else {
-            routeEl.innerHTML = topRoutes.map(([r, c]) =>
-                `<div class="stat-route-row"><span class="stat-route-name">${r}</span><span class="stat-route-count">${c.toLocaleString()}</span></div>`
-            ).join('');
-        }
-    }
-
-    const approved = allResults.filter(r => (r.status || '').toLowerCase() === 'approved').length;
-    const inactive = allResults.length - approved;
-    const statApproved = document.getElementById('statStatusApproved');
-    const statInactive = document.getElementById('statStatusInactive');
-    const statTotal    = document.getElementById('statTotal');
-    if (statApproved) statApproved.textContent = approved.toLocaleString();
-    if (statInactive) statInactive.textContent = inactive.toLocaleString();
-    if (statTotal)    statTotal.textContent    = allResults.length.toLocaleString();
-}
-
-// ── Load-more banner ──────────────────────────────────────────────────────
-function renderLoadMoreBanner() {
-    const container = document.getElementById('loadMoreBannerContainer');
-    if (!container) return;
-
-    const totalAvailable = window._fullMerged ? window._fullMerged.length : 0;
-    const shouldShow = fullDataset === null
-        && activeDays === 360
-        && totalAvailable > RESULT_CAP;
-
-    if (!shouldShow) {
-        container.innerHTML = '';
-        return;
-    }
-
-    const extra = totalAvailable - RESULT_CAP;
-    container.innerHTML = `
-        <div id="loadMoreBanner" class="load-more-banner">
-            <span>You're viewing the most recent <strong>${RESULT_CAP.toLocaleString()}</strong> products.
-            The last 360 days contains <strong>${totalAvailable.toLocaleString()}</strong> total
-            (<strong>+${extra.toLocaleString()}</strong> more).</span>
-            <button class="btn-load-more" onclick="loadFullDataset()">
-                Load all ${totalAvailable.toLocaleString()} products
-            </button>
-        </div>`;
-}
-
-function downloadCSV() {
-    const headers = COLUMNS.map(c => c.label);
-    const rows = getSorted(filteredResults).map(obj =>
-        COLUMNS.map(c => {
-            const v = obj[c.key] || '';
-            return `"${String(v).replace(/"/g, '""')}"`;
-        }).join(',')
-    );
-    const csv  = [headers.join(','), ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = 'drug_products.csv';
-    a.click();
-    URL.revokeObjectURL(url);
-}
-
-// ── Rendering ─────────────────────────────────────────────────────────────
+// ── Rendering ───────────────────────────────────────────────────────────
 function renderAll() {
     renderResultsMeta();
     renderTable();
@@ -379,13 +158,12 @@ function renderAll() {
 function renderResultsMeta() {
     const meta  = document.getElementById('resultsMeta');
     const count = document.getElementById('resultsCount');
-    if (meta)  meta.style.display = 'flex';
-    if (count) count.innerHTML = `Showing <strong>${filteredResults.length.toLocaleString()}</strong> of <strong>${allResults.length.toLocaleString()}</strong> products`;
+    meta.style.display  = 'flex';
+    count.innerHTML = `Showing <strong>${filteredResults.length.toLocaleString()}</strong> of <strong>${allResults.length.toLocaleString()}</strong> products`;
 }
 
 function renderTable() {
     const container = document.getElementById('table-container');
-    if (!container) return;
 
     if (filteredResults.length === 0) {
         container.innerHTML = `
@@ -397,8 +175,8 @@ function renderTable() {
         return;
     }
 
-    const sorted   = getSorted(filteredResults);
-    const start    = (currentPage - 1) * PAGE_SIZE;
+    const sorted  = getSorted(filteredResults);
+    const start   = (currentPage - 1) * PAGE_SIZE;
     const pageData = sorted.slice(start, start + PAGE_SIZE);
 
     const wrapper = document.createElement('div');
@@ -409,6 +187,7 @@ function renderTable() {
 
     const table = document.createElement('table');
 
+    // Header
     const thead = table.createTHead();
     const headerRow = thead.insertRow();
     COLUMNS.forEach(col => {
@@ -421,6 +200,7 @@ function renderTable() {
         headerRow.appendChild(th);
     });
 
+    // Body
     const tbody = document.createElement('tbody');
     pageData.forEach(obj => {
         const row = tbody.insertRow();
@@ -450,7 +230,6 @@ function renderTable() {
 
 function renderPagination() {
     const container  = document.getElementById('pagination');
-    if (!container) return;
     const totalPages = Math.ceil(filteredResults.length / PAGE_SIZE);
     container.innerHTML = '';
 
@@ -467,20 +246,21 @@ function renderPagination() {
 
     container.appendChild(makeBtn('←', currentPage - 1, currentPage === 1, false));
 
-    const win = 5;
-    let wStart = Math.max(1, currentPage - Math.floor(win / 2));
-    let wEnd   = Math.min(totalPages, wStart + win - 1);
-    if (wEnd - wStart + 1 < win) wStart = Math.max(1, wEnd - win + 1);
+    // Show a sliding window of page numbers
+    const window_size = 5;
+    let start = Math.max(1, currentPage - Math.floor(window_size / 2));
+    let end   = Math.min(totalPages, start + window_size - 1);
+    if (end - start + 1 < window_size) start = Math.max(1, end - window_size + 1);
 
-    if (wStart > 1) {
+    if (start > 1) {
         container.appendChild(makeBtn('1', 1, false, false));
-        if (wStart > 2) { const el = document.createElement('span'); el.textContent = '…'; el.style.cssText = 'padding:0 4px;color:var(--grey-300)'; container.appendChild(el); }
+        if (start > 2) { const el = document.createElement('span'); el.textContent = '…'; el.style.padding = '0 4px'; el.style.color = 'var(--grey-300)'; container.appendChild(el); }
     }
-    for (let p = wStart; p <= wEnd; p++) {
+    for (let p = start; p <= end; p++) {
         container.appendChild(makeBtn(p, p, false, p === currentPage));
     }
-    if (wEnd < totalPages) {
-        if (wEnd < totalPages - 1) { const el = document.createElement('span'); el.textContent = '…'; el.style.cssText = 'padding:0 4px;color:var(--grey-300)'; container.appendChild(el); }
+    if (end < totalPages) {
+        if (end < totalPages - 1) { const el = document.createElement('span'); el.textContent = '…'; el.style.padding = '0 4px'; el.style.color = 'var(--grey-300)'; container.appendChild(el); }
         container.appendChild(makeBtn(totalPages, totalPages, false, false));
     }
 
@@ -489,7 +269,6 @@ function renderPagination() {
 
 function renderPills(company, ingredient) {
     const pillsContainer = document.getElementById('activePills');
-    if (!pillsContainer) return;
     pillsContainer.innerHTML = '';
 
     const addPill = (label, field) => {
@@ -499,48 +278,42 @@ function renderPills(company, ingredient) {
         pillsContainer.appendChild(pill);
     };
 
-    if (company)    addPill(`Company: ${company}`,       'companyFilter');
-    if (ingredient) addPill(`Ingredient: ${ingredient}`, 'ingredientFilter');
-    if (activeRoute) addPill(`Route: ${activeRoute}`,    '_route');
-    if (activeDays)  addPill(`Last ${activeDays} days`,  '_days');
+    if (company)    addPill(`Company: ${company}`,         'companyFilter');
+    if (ingredient) addPill(`Ingredient: ${ingredient}`,   'ingredientFilter');
 }
 
-// ── Loading / error states ────────────────────────────────────────────────
+// ── Loading / error states ───────────────────────────────────────────────
 function showLoading() {
-    const el = document.getElementById('table-container');
-    if (el) {
-        el.innerHTML = `
-            <div class="loading-state">
-                <div class="spinner"></div>
-                <span class="loading-label">Loading drug data…</span>
-                <span class="loading-sub">Fetching from Health Canada's database</span>
-            </div>`;
-    }
+    document.getElementById('table-container').innerHTML = `
+        <div class="loading-state">
+            <div class="spinner"></div>
+            <span class="loading-label">Loading drug data…</span>
+            <span class="loading-sub">Fetching from Health Canada's database</span>
+        </div>`;
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────────
+function showError() {
+    document.getElementById('table-container').innerHTML = `
+        <div class="state-box">
+            <div class="state-icon">⚠️</div>
+            <div class="state-title">Couldn't load data</div>
+            <div class="state-body">There was a problem reaching the Health Canada API. Check your connection and reload the page.</div>
+        </div>`;
+}
+
+// ── Live filtering on Enter ──────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     ['companyFilter', 'ingredientFilter'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) {
-            el.addEventListener('keydown', e => {
-                if (e.key === 'Enter') applyFilters();
-            });
-        }
+        document.getElementById(id).addEventListener('keydown', e => {
+            if (e.key === 'Enter') applyFilters();
+        });
     });
-
-    const quickFilter = document.getElementById('quickFilter');
-    if (quickFilter) {
-        quickFilter.addEventListener('input', onQuickInput);
-    }
-    
     main();
 });
 
-// ── Modal ─────────────────────────────────────────────────────────────────
+// ── Modal ────────────────────────────────────────────────────────────────
 function openModal(obj) {
     const root = document.getElementById('modal-root');
-    if (!root) return;
     const din  = obj.drug_identification_number;
     const code = obj.drug_code;
 
@@ -563,24 +336,196 @@ function openModal(obj) {
             </div>
         </div>`;
 
-    const backdrop = document.getElementById('modalBackdrop');
-    if (backdrop) {
-        backdrop.addEventListener('click', e => {
-            if (e.target === e.currentTarget) closeModal();
-        });
-    }
+    // Close on backdrop click
+    document.getElementById('modalBackdrop').addEventListener('click', e => {
+        if (e.target === e.currentTarget) closeModal();
+    });
+    // Close on Escape
     document._modalEsc = (e) => { if (e.key === 'Escape') closeModal(); };
     document.addEventListener('keydown', document._modalEsc);
 
     fetchModalData(code, din).then(html => {
-        const body = document.querySelector('.modal-body');
-        if (body) body.innerHTML = html;
+        document.querySelector('.modal-body').innerHTML = html;
     });
 }
 
 function closeModal() {
-    const root = document.getElementById('modal-root');
-    if (root) root.innerHTML = '';
+    document.getElementById('modal-root').innerHTML = '';
     document.removeEventListener('keydown', document._modalEsc);
 }
-// ── (Remaining structural HTML building helpers omitted for length) ───────
+
+async function fetchModalData(drugCode, din) {
+    const base = 'https://health-products.canada.ca/api/drug';
+    try {
+        const [product, ingredients, company, forms, packaging,
+               routes, schedules, status, therapeutic] = await Promise.all([
+            fetchData(`${base}/drugproduct/?id=${drugCode}&lang=en&type=json`),
+            fetchData(`${base}/activeingredient/?id=${drugCode}&lang=en&type=json`),
+            fetchData(`${base}/company/?lang=en&type=json`),          // filtered below by company_code
+            fetchData(`${base}/form/?id=${drugCode}&lang=en&type=json`),
+            fetchData(`${base}/packaging/?id=${drugCode}&type=json`),
+            fetchData(`${base}/route/?id=${drugCode}&lang=en&type=json`),
+            fetchData(`${base}/schedule/?id=${drugCode}&lang=en&type=json`),
+            fetchData(`${base}/status/?id=${drugCode}&lang=en&type=json`),
+            fetchData(`${base}/therapeuticclass/?id=${drugCode}&lang=en&type=json`),
+        ]);
+
+        // product may be an object or single-element array
+        const prod = Array.isArray(product) ? product[0] : product;
+
+        // Find company details matching the product's company_code
+        const companyList = Array.isArray(company) ? company : [company];
+        const comp = companyList.find(c => c.company_code === prod?.company_code) || {};
+
+        return buildModalHTML(prod, ingredients, comp, forms, packaging, routes, schedules, status, therapeutic);
+    } catch (err) {
+        console.error('Modal fetch error:', err);
+        return `<div class="modal-error">⚠️ Could not load product details. Please try again.</div>`;
+    }
+}
+
+function val(v) {
+    if (v === null || v === undefined || v === '' || v === 0) return '—';
+    return v;
+}
+
+function field(label, value) {
+    return `<div class="modal-field"><label>${label}</label><span>${val(value)}</span></div>`;
+}
+
+function buildModalHTML(prod, ingredients, comp, forms, packaging, routes, schedules, status, therapeutic) {
+    const sections = [];
+
+    // ── Product overview ──
+    sections.push(`
+        <div class="modal-section">
+            <div class="modal-section-title">Product overview</div>
+            <div class="modal-grid">
+                ${field('DIN',         prod?.drug_identification_number)}
+                ${field('Brand name',  prod?.brand_name)}
+                ${field('Class',       prod?.class_name)}
+                ${field('Descriptor',  prod?.descriptor)}
+                ${field('AI group #',  prod?.ai_group_no)}
+                ${field('Last updated', prod?.last_update_date)}
+            </div>
+        </div>`);
+
+    // ── Company ──
+    if (comp?.company_name) {
+        sections.push(`
+            <div class="modal-section">
+                <div class="modal-section-title">Company</div>
+                <div class="modal-grid">
+                    ${field('Name',     comp.company_name)}
+                    ${field('Type',     comp.company_type)}
+                    ${field('Address',  [comp.street_name, comp.suite_number].filter(Boolean).join(', '))}
+                    ${field('City',     comp.city_name)}
+                    ${field('Province', comp.province_name)}
+                    ${field('Postal code', comp.postal_code)}
+                    ${field('Country',  comp.country_name)}
+                </div>
+            </div>`);
+    }
+
+    // ── Active ingredients ──
+    const ings = Array.isArray(ingredients) ? ingredients : (ingredients ? [ingredients] : []);
+    if (ings.length > 0) {
+        const rows = ings.map(i => `
+            <tr>
+                <td>${val(i.ingredient_name)}</td>
+                <td>${val(i.strength)} ${val(i.strength_unit)}</td>
+                <td>${val(i.dosage_value)} ${val(i.dosage_unit)}</td>
+            </tr>`).join('');
+        sections.push(`
+            <div class="modal-section">
+                <div class="modal-section-title">Active ingredients</div>
+                <table class="modal-table">
+                    <thead><tr><th>Ingredient</th><th>Strength</th><th>Dosage</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>`);
+    }
+
+    // ── Dosage forms ──
+    const formList = Array.isArray(forms) ? forms : (forms ? [forms] : []);
+    if (formList.length > 0) {
+        sections.push(`
+            <div class="modal-section">
+                <div class="modal-section-title">Dosage form</div>
+                <div class="modal-grid">
+                    ${formList.map(f => field('Form', f.pharmaceutical_form_name)).join('')}
+                </div>
+            </div>`);
+    }
+
+    // ── Routes of administration ──
+    const routeList = Array.isArray(routes) ? routes : (routes ? [routes] : []);
+    if (routeList.length > 0) {
+        sections.push(`
+            <div class="modal-section">
+                <div class="modal-section-title">Route of administration</div>
+                <div class="modal-grid">
+                    ${routeList.map(r => field('Route', r.route_of_administration_name)).join('')}
+                </div>
+            </div>`);
+    }
+
+    // ── Schedule ──
+    const schedList = Array.isArray(schedules) ? schedules : (schedules ? [schedules] : []);
+    if (schedList.length > 0) {
+        sections.push(`
+            <div class="modal-section">
+                <div class="modal-section-title">Schedule</div>
+                <div class="modal-grid">
+                    ${schedList.map(s => field('Schedule', s.schedule_name)).join('')}
+                </div>
+            </div>`);
+    }
+
+    // ── Status history ──
+    const statusList = Array.isArray(status) ? status : (status ? [status] : []);
+    if (statusList.length > 0) {
+        const rows = statusList.map(s => `
+            <tr>
+                <td>${val(s.status)}</td>
+                <td>${val(s.history_date)}</td>
+                <td>${val(s.original_market_date)}</td>
+                <td>${val(s.expiration_date)}</td>
+            </tr>`).join('');
+        sections.push(`
+            <div class="modal-section">
+                <div class="modal-section-title">Status history</div>
+                <table class="modal-table">
+                    <thead><tr><th>Status</th><th>History date</th><th>Original market date</th><th>Expiry date</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>`);
+    }
+
+    // ── Therapeutic class ──
+    const tcList = Array.isArray(therapeutic) ? therapeutic : (therapeutic ? [therapeutic] : []);
+    if (tcList.length > 0) {
+        sections.push(`
+            <div class="modal-section">
+                <div class="modal-section-title">Therapeutic class</div>
+                <div class="modal-grid">
+                    ${tcList.map(t => field(`${val(t.tc_atc_number)}`, t.tc_atc)).join('')}
+                </div>
+            </div>`);
+    }
+
+    // ── Packaging ──
+    const packList = Array.isArray(packaging) ? packaging : (packaging ? [packaging] : []);
+    const packFiltered = packList.filter(p => p.product_information || p.package_type || p.package_size);
+    if (packFiltered.length > 0) {
+        sections.push(`
+            <div class="modal-section">
+                <div class="modal-section-title">Packaging</div>
+                <div class="modal-grid">
+                    ${packFiltered.map(p => field('Package info', p.product_information || [p.package_size, p.package_size_unit, p.package_type].filter(Boolean).join(' '))).join('')}
+                </div>
+            </div>`);
+    }
+
+    return sections.join('');
+}
